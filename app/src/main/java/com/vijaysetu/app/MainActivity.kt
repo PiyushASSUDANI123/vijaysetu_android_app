@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.media.MediaScannerConnection
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -38,13 +39,27 @@ class MainActivity : AppCompatActivity() {
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
+    // File picker launcher supporting single file, multiple files, and null-safe cancellation
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (filePathCallback != null) {
-            val data = result.data
-            val results = WebChromeClient.FileChooserParams.parseResult(result.resultCode, data)
-            filePathCallback?.onReceiveValue(results)
+            var uris: Array<Uri>? = null
+            if (result.resultCode == RESULT_OK && result.data != null) {
+                val data = result.data
+                val singleUri = data?.data
+                val clipData = data?.clipData
+
+                uris = when {
+                    singleUri != null -> arrayOf(singleUri)
+                    clipData != null -> {
+                        val count = clipData.itemCount
+                        Array(count) { i -> clipData.getItemAt(i).uri }
+                    }
+                    else -> WebChromeClient.FileChooserParams.parseResult(result.resultCode, data)
+                }
+            }
+            filePathCallback?.onReceiveValue(uris)
             filePathCallback = null
         }
     }
@@ -86,6 +101,7 @@ class MainActivity : AppCompatActivity() {
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
         settings.allowFileAccess = true
+        settings.allowContentAccess = true
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = true
         settings.builtInZoomControls = false
@@ -113,61 +129,12 @@ class MainActivity : AppCompatActivity() {
         val defaultUserAgent = settings.userAgentString
         settings.userAgentString = "$defaultUserAgent VijaySetuAndroidApp/1.0"
 
+        // Native JavaScript bridge for Blob and Base64 file downloads
         webView.addJavascriptInterface(BlobDownloaderInterface(this), "AndroidBlobDownloader")
 
+        // Download Listener for network attachment links
         webView.setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
-            try {
-                if (url.startsWith("blob:")) {
-                    val guessedName = URLUtil.guessFileName(url, contentDisposition, mimetype)
-                    val script = """
-                        (function() {
-                            var xhr = new XMLHttpRequest();
-                            xhr.open('GET', '$url', true);
-                            xhr.responseType = 'blob';
-                            xhr.onload = function(e) {
-                                if (this.status == 200) {
-                                    var blob = this.response;
-                                    var reader = new FileReader();
-                                    reader.readAsDataURL(blob);
-                                    reader.onloadend = function() {
-                                        AndroidBlobDownloader.processBase64Blob(reader.result, '$guessedName');
-                                    };
-                                }
-                            };
-                            xhr.send();
-                        })();
-                    """.trimIndent()
-                    webView.evaluateJavascript(script, null)
-                    Toast.makeText(this, "फ़ाइल डाउनलोड हो रही है...", Toast.LENGTH_SHORT).show()
-                    return@setDownloadListener
-                }
-
-                if (url.startsWith("http://") || url.startsWith("https://")) {
-                    val request = DownloadManager.Request(Uri.parse(url)).apply {
-                        setMimeType(mimetype)
-                        addRequestHeader("User-Agent", userAgent)
-                        addRequestHeader("Cookie", CookieManager.getInstance().getCookie(url) ?: "")
-                        setDescription("VijaySetu File Download")
-                        val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
-                        setTitle(fileName)
-                        setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                        setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-                    }
-                    val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-                    dm.enqueue(request)
-                    Toast.makeText(this, "डाउनलोड शुरू हो गया...", Toast.LENGTH_SHORT).show()
-                } else {
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                    startActivity(intent)
-                }
-            } catch (e: Exception) {
-                try {
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                    startActivity(intent)
-                } catch (ex: Exception) {
-                    Toast.makeText(this, "डाउनलोड पूरा नहीं हो सका", Toast.LENGTH_SHORT).show()
-                }
-            }
+            downloadHttpFile(url, userAgent, contentDisposition, mimetype)
         }
 
         webView.webViewClient = object : WebViewClient() {
@@ -176,12 +143,14 @@ class MainActivity : AppCompatActivity() {
                 progressBar.visibility = View.VISIBLE
                 offlineLayout.visibility = View.GONE
                 webView.visibility = View.VISIBLE
+                injectBlobInterceptionScript()
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 progressBar.visibility = View.GONE
                 swipeRefreshLayout.isRefreshing = false
+                injectBlobInterceptionScript()
             }
 
             override fun onReceivedError(
@@ -213,13 +182,13 @@ class MainActivity : AppCompatActivity() {
                 request: WebResourceRequest?
             ): Boolean {
                 val url = request?.url?.toString() ?: return false
-                return handleExternalUrls(url)
+                return handleUrlNavigation(url)
             }
 
             @Deprecated("Deprecated in Java")
             override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
                 if (url == null) return false
-                return handleExternalUrls(url)
+                return handleUrlNavigation(url)
             }
         }
 
@@ -232,6 +201,15 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                try {
+                    request?.grant(request.resources)
+                } catch (e: Exception) {
+                    super.onPermissionRequest(request)
+                }
+            }
+
+            // Rock-solid file chooser for PDF, Excel, Images and documents
             override fun onShowFileChooser(
                 mWebView: WebView?,
                 filePathCallback: ValueCallback<Array<Uri>>?,
@@ -240,28 +218,147 @@ class MainActivity : AppCompatActivity() {
                 this@MainActivity.filePathCallback?.onReceiveValue(null)
                 this@MainActivity.filePathCallback = filePathCallback
 
-                val intent = fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
-                    type = "*/*"
-                }
+                try {
+                    val acceptTypes = fileChooserParams?.acceptTypes?.filter { it.isNotBlank() } ?: emptyList()
+                    val mimeTypes = mutableListOf<String>()
 
-                return try {
-                    filePickerLauncher.launch(intent)
-                    true
+                    for (raw in acceptTypes) {
+                        for (type in raw.split(",")) {
+                            val trimmed = type.trim()
+                            when {
+                                trimmed.contains("/") -> mimeTypes.add(trimmed)
+                                trimmed.equals(".pdf", ignoreCase = true) -> mimeTypes.add("application/pdf")
+                                trimmed.equals(".xlsx", ignoreCase = true) -> mimeTypes.add("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                                trimmed.equals(".xls", ignoreCase = true) -> mimeTypes.add("application/vnd.ms-excel")
+                                trimmed.equals(".csv", ignoreCase = true) -> mimeTypes.add("text/csv")
+                                trimmed.equals(".png", ignoreCase = true) -> mimeTypes.add("image/png")
+                                trimmed.equals(".jpg", ignoreCase = true) || trimmed.equals(".jpeg", ignoreCase = true) -> mimeTypes.add("image/jpeg")
+                                trimmed == "*/*" -> mimeTypes.add("*/*")
+                            }
+                        }
+                    }
+
+                    val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        if (mimeTypes.isEmpty()) {
+                            type = "*/*"
+                        } else if (mimeTypes.size == 1) {
+                            type = mimeTypes[0]
+                        } else {
+                            type = "*/*"
+                            putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.toTypedArray())
+                        }
+                        if (fileChooserParams?.mode == FileChooserParams.MODE_OPEN_MULTIPLE) {
+                            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                        }
+                    }
+
+                    val chooser = Intent.createChooser(intent, "फ़ाइल चुनें (Select File)")
+                    filePickerLauncher.launch(chooser)
+                    return true
                 } catch (e: Exception) {
+                    this@MainActivity.filePathCallback?.onReceiveValue(null)
                     this@MainActivity.filePathCallback = null
-                    false
+                    Toast.makeText(this@MainActivity, "फ़ाइल पिकर खोलने में समस्या आई", Toast.LENGTH_SHORT).show()
+                    return false
                 }
             }
         }
     }
 
-    private fun handleExternalUrls(url: String): Boolean {
+    // Injects JavaScript to intercept all blob: and data: download triggers in DOM
+    private fun injectBlobInterceptionScript() {
+        val script = """
+            (function() {
+                if (window.__vijaySetuDownloaderActive) return;
+                window.__vijaySetuDownloaderActive = true;
+
+                function fetchAndSendBlob(blobUrl, filename) {
+                    try {
+                        var xhr = new XMLHttpRequest();
+                        xhr.open('GET', blobUrl, true);
+                        xhr.responseType = 'blob';
+                        xhr.onload = function() {
+                            if (this.status === 200 || this.status === 0) {
+                                var reader = new FileReader();
+                                reader.onloadend = function() {
+                                    if (window.AndroidBlobDownloader && window.AndroidBlobDownloader.processBase64Blob) {
+                                        window.AndroidBlobDownloader.processBase64Blob(reader.result, filename || 'download.xlsx');
+                                    }
+                                };
+                                reader.readAsDataURL(this.response);
+                            }
+                        };
+                        xhr.onerror = function() {
+                            console.error('Blob fetch failed for', blobUrl);
+                        };
+                        xhr.send();
+                    } catch (e) {
+                        console.error('fetchAndSendBlob error', e);
+                    }
+                }
+
+                // Intercept synthetic/programmatic <a>.click() calls
+                var origClick = HTMLAnchorElement.prototype.click;
+                HTMLAnchorElement.prototype.click = function() {
+                    var href = this.getAttribute('href') || this.href || '';
+                    var downloadAttr = this.getAttribute('download') || this.download || '';
+                    if (href) {
+                        if (href.indexOf('data:') === 0) {
+                            if (window.AndroidBlobDownloader && window.AndroidBlobDownloader.processBase64Blob) {
+                                window.AndroidBlobDownloader.processBase64Blob(href, downloadAttr || 'download.jpg');
+                                return;
+                            }
+                        } else if (href.indexOf('blob:') === 0) {
+                            fetchAndSendBlob(href, downloadAttr || 'download.xlsx');
+                            return;
+                        }
+                    }
+                    return origClick.apply(this, arguments);
+                };
+
+                // Intercept user tap/click on download elements
+                document.addEventListener('click', function(e) {
+                    var target = e.target;
+                    while (target && target.tagName !== 'A') {
+                        target = target.parentElement;
+                    }
+                    if (target && target.tagName === 'A') {
+                        var href = target.getAttribute('href') || target.href || '';
+                        var downloadAttr = target.getAttribute('download') || target.download || '';
+                        if (href) {
+                            if (href.indexOf('data:') === 0) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                if (window.AndroidBlobDownloader && window.AndroidBlobDownloader.processBase64Blob) {
+                                    window.AndroidBlobDownloader.processBase64Blob(href, downloadAttr || 'download.jpg');
+                                }
+                            } else if (href.indexOf('blob:') === 0) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                fetchAndSendBlob(href, downloadAttr || 'download.xlsx');
+                            }
+                        }
+                    }
+                }, true);
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(script, null)
+    }
+
+    private fun handleUrlNavigation(url: String): Boolean {
+        // Direct download interception for export links
+        val lowerUrl = url.lowercase()
+        if (lowerUrl.endsWith(".pdf") || lowerUrl.endsWith(".xlsx") || lowerUrl.endsWith(".xls") || lowerUrl.endsWith(".csv") || lowerUrl.contains("/download-excel/")) {
+            downloadHttpFile(url)
+            return true
+        }
+
         // Handle custom intent URIs (WhatsApp, UPI, custom apps)
         if (url.startsWith("intent:")) {
             return try {
                 val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
                 if (intent != null) {
-                    val packageManager = packageManager
                     val info = packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
                     if (info != null) {
                         startActivity(intent)
@@ -296,7 +393,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Phone call & Email & Maps
+        // Phone call, Email, Maps
         if (url.startsWith("tel:") || url.startsWith("mailto:") || url.startsWith("geo:")) {
             return try {
                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
@@ -308,6 +405,44 @@ class MainActivity : AppCompatActivity() {
         }
 
         return false
+    }
+
+    private fun downloadHttpFile(
+        url: String,
+        userAgent: String = webView.settings.userAgentString,
+        contentDisposition: String? = null,
+        mimetype: String? = null
+    ) {
+        try {
+            if (url.startsWith("blob:") || url.startsWith("data:")) {
+                // Handled via JS bridge
+                return
+            }
+
+            val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+            val request = DownloadManager.Request(Uri.parse(url)).apply {
+                if (mimetype != null) setMimeType(mimetype)
+                addRequestHeader("User-Agent", userAgent)
+                val cookie = CookieManager.getInstance().getCookie(url)
+                if (!cookie.isNullOrBlank()) {
+                    addRequestHeader("Cookie", cookie)
+                }
+                setDescription("VijaySetu File Download")
+                setTitle(fileName)
+                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+            }
+            val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            dm.enqueue(request)
+            Toast.makeText(this, "डाउनलोड शुरू हो गया...", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                startActivity(intent)
+            } catch (ex: Exception) {
+                Toast.makeText(this, "डाउनलोड पूरा नहीं हो सका", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun setupSwipeRefresh() {
@@ -370,45 +505,48 @@ class MainActivity : AppCompatActivity() {
     class BlobDownloaderInterface(private val activity: MainActivity) {
         @JavascriptInterface
         fun processBase64Blob(base64Data: String, suggestedName: String) {
-            try {
-                val cleanBase64 = if (base64Data.contains(",")) {
-                    base64Data.substringAfter(",")
-                } else {
-                    base64Data
-                }
-                val bytes = Base64.decode(cleanBase64, Base64.DEFAULT)
-                val fileName = if (suggestedName.isNotBlank() && suggestedName != "undefined") {
-                    suggestedName
-                } else {
-                    "vijaysetu_${System.currentTimeMillis()}.xlsx"
-                }
-
-                val resolver = activity.contentResolver
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val contentValues = ContentValues().apply {
-                        put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-                        put(MediaStore.MediaColumns.MIME_TYPE, activity.getMimeType(fileName))
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            activity.runOnUiThread {
+                try {
+                    val cleanBase64 = if (base64Data.contains(",")) {
+                        base64Data.substringAfter(",")
+                    } else {
+                        base64Data
                     }
-                    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
-                    if (uri != null) {
-                        resolver.openOutputStream(uri)?.use { os ->
+                    val bytes = Base64.decode(cleanBase64, Base64.DEFAULT)
+                    val rawName = if (suggestedName.isNotBlank() && suggestedName != "undefined") {
+                        suggestedName
+                    } else {
+                        "vijaysetu_${System.currentTimeMillis()}.xlsx"
+                    }
+                    val fileName = rawName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+                    val mimeType = activity.getMimeType(fileName)
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val contentValues = ContentValues().apply {
+                            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                        }
+                        val uri = activity.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+                        if (uri != null) {
+                            activity.contentResolver.openOutputStream(uri)?.use { os ->
+                                os.write(bytes)
+                            }
+                            Toast.makeText(activity, "फ़ाइल डाउनलोड हो गई: $fileName", Toast.LENGTH_LONG).show()
+                        } else {
+                            throw Exception("MediaStore insert returned null")
+                        }
+                    } else {
+                        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                        if (!downloadsDir.exists()) downloadsDir.mkdirs()
+                        val file = File(downloadsDir, fileName)
+                        FileOutputStream(file).use { os ->
                             os.write(bytes)
                         }
+                        MediaScannerConnection.scanFile(activity, arrayOf(file.absolutePath), arrayOf(mimeType), null)
+                        Toast.makeText(activity, "फ़ाइल डाउनलोड हो गई: $fileName", Toast.LENGTH_LONG).show()
                     }
-                } else {
-                    val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                    if (!downloadsDir.exists()) downloadsDir.mkdirs()
-                    val file = File(downloadsDir, fileName)
-                    FileOutputStream(file).use { os ->
-                        os.write(bytes)
-                    }
-                }
-                activity.runOnUiThread {
-                    Toast.makeText(activity, "फ़ाइल डाउनलोड हो गई: $fileName", Toast.LENGTH_LONG).show()
-                }
-            } catch (e: Exception) {
-                activity.runOnUiThread {
+                } catch (e: Exception) {
                     Toast.makeText(activity, "डाउनलोड पूरा नहीं हो सका", Toast.LENGTH_SHORT).show()
                 }
             }
