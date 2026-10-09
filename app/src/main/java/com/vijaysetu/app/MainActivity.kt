@@ -2,8 +2,10 @@ package com.vijaysetu.app
 
 import android.annotation.SuppressLint
 import android.app.DownloadManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -11,6 +13,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.MediaStore
+import android.util.Base64
 import android.view.View
 import android.webkit.*
 import android.widget.Button
@@ -21,6 +25,8 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+import java.io.File
+import java.io.FileOutputStream
 
 class MainActivity : AppCompatActivity() {
 
@@ -53,8 +59,8 @@ class MainActivity : AppCompatActivity() {
         offlineLayout = findViewById(R.id.offlineLayout)
         btnRetry = findViewById(R.id.btnRetry)
 
-        setupSwipeRefresh()
         setupWebView()
+        setupSwipeRefresh()
         setupBackPressHandler()
 
         btnRetry.setOnClickListener {
@@ -87,6 +93,11 @@ class MainActivity : AppCompatActivity() {
         settings.setSupportZoom(false)
         settings.textZoom = 100
         settings.cacheMode = WebSettings.LOAD_DEFAULT
+        settings.setSupportMultipleWindows(false)
+        settings.javaScriptCanOpenWindowsAutomatically = true
+        settings.mediaPlaybackRequiresUserGesture = false
+
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
@@ -102,8 +113,35 @@ class MainActivity : AppCompatActivity() {
         val defaultUserAgent = settings.userAgentString
         settings.userAgentString = "$defaultUserAgent VijaySetuAndroidApp/1.0"
 
+        webView.addJavascriptInterface(BlobDownloaderInterface(this), "AndroidBlobDownloader")
+
         webView.setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
             try {
+                if (url.startsWith("blob:")) {
+                    val guessedName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                    val script = """
+                        (function() {
+                            var xhr = new XMLHttpRequest();
+                            xhr.open('GET', '$url', true);
+                            xhr.responseType = 'blob';
+                            xhr.onload = function(e) {
+                                if (this.status == 200) {
+                                    var blob = this.response;
+                                    var reader = new FileReader();
+                                    reader.readAsDataURL(blob);
+                                    reader.onloadend = function() {
+                                        AndroidBlobDownloader.processBase64Blob(reader.result, '$guessedName');
+                                    };
+                                }
+                            };
+                            xhr.send();
+                        })();
+                    """.trimIndent()
+                    webView.evaluateJavascript(script, null)
+                    Toast.makeText(this, "फ़ाइल डाउनलोड हो रही है...", Toast.LENGTH_SHORT).show()
+                    return@setDownloadListener
+                }
+
                 if (url.startsWith("http://") || url.startsWith("https://")) {
                     val request = DownloadManager.Request(Uri.parse(url)).apply {
                         setMimeType(mimetype)
@@ -218,6 +256,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleExternalUrls(url: String): Boolean {
+        // Handle custom intent URIs (WhatsApp, UPI, custom apps)
+        if (url.startsWith("intent:")) {
+            return try {
+                val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+                if (intent != null) {
+                    val packageManager = packageManager
+                    val info = packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+                    if (info != null) {
+                        startActivity(intent)
+                        return true
+                    }
+                    val fallbackUrl = intent.getStringExtra("browser_fallback_url")
+                    if (fallbackUrl != null) {
+                        webView.loadUrl(fallbackUrl)
+                        return true
+                    }
+                }
+                false
+            } catch (e: Exception) {
+                false
+            }
+        }
+
         // Direct WhatsApp Links
         if (url.startsWith("whatsapp://") || url.startsWith("https://wa.me/") || url.startsWith("https://api.whatsapp.com/")) {
             return try {
@@ -292,6 +353,65 @@ class MainActivity : AppCompatActivity() {
             val networkInfo = connectivityManager.activeNetworkInfo ?: return false
             @Suppress("DEPRECATION")
             return networkInfo.isConnected
+        }
+    }
+
+    fun getMimeType(fileName: String): String {
+        return when {
+            fileName.endsWith(".xlsx", ignoreCase = true) -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            fileName.endsWith(".pdf", ignoreCase = true) -> "application/pdf"
+            fileName.endsWith(".csv", ignoreCase = true) -> "text/csv"
+            fileName.endsWith(".png", ignoreCase = true) -> "image/png"
+            fileName.endsWith(".jpg", ignoreCase = true) || fileName.endsWith(".jpeg", ignoreCase = true) -> "image/jpeg"
+            else -> "*/*"
+        }
+    }
+
+    class BlobDownloaderInterface(private val activity: MainActivity) {
+        @JavascriptInterface
+        fun processBase64Blob(base64Data: String, suggestedName: String) {
+            try {
+                val cleanBase64 = if (base64Data.contains(",")) {
+                    base64Data.substringAfter(",")
+                } else {
+                    base64Data
+                }
+                val bytes = Base64.decode(cleanBase64, Base64.DEFAULT)
+                val fileName = if (suggestedName.isNotBlank() && suggestedName != "undefined") {
+                    suggestedName
+                } else {
+                    "vijaysetu_${System.currentTimeMillis()}.xlsx"
+                }
+
+                val resolver = activity.contentResolver
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val contentValues = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                        put(MediaStore.MediaColumns.MIME_TYPE, activity.getMimeType(fileName))
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                    }
+                    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+                    if (uri != null) {
+                        resolver.openOutputStream(uri)?.use { os ->
+                            os.write(bytes)
+                        }
+                    }
+                } else {
+                    val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                    if (!downloadsDir.exists()) downloadsDir.mkdirs()
+                    val file = File(downloadsDir, fileName)
+                    FileOutputStream(file).use { os ->
+                        os.write(bytes)
+                    }
+                }
+                activity.runOnUiThread {
+                    Toast.makeText(activity, "फ़ाइल डाउनलोड हो गई: $fileName", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                activity.runOnUiThread {
+                    Toast.makeText(activity, "डाउनलोड पूरा नहीं हो सका", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 }
