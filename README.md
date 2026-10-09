@@ -4,6 +4,13 @@ VijaySetu (विजयसेतु) का ऑफिशियल Android WebVie
 
 ---
 
+## 📲 Direct APK Download (सीधे इंस्टॉल करें)
+रिपॉजिटरी में तैयार APK शामिल है जिसे आप सीधे अपने एंड्रॉइड फोन में इंस्टॉल कर सकते हैं:
+- [**vijaysetu-v1.0.apk**](./vijaysetu-v1.0.apk) (Ready-to-install, ~6.0 MB)
+- [**app-release.apk**](./app-release.apk)
+
+---
+
 ## मुख्य फीचर्स (Key Features)
 
 1. **फुल-स्क्रीन मोबाइल इंटरफेस**: स्टेटस बार के साथ मैचिंग एमराल्ड थीम (`#059669`)।

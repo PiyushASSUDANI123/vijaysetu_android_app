@@ -1,6 +1,7 @@
 package com.vijaysetu.app
 
 import android.annotation.SuppressLint
+import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -9,11 +10,13 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.view.View
 import android.webkit.*
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -81,7 +84,16 @@ class MainActivity : AppCompatActivity() {
         settings.loadWithOverviewMode = true
         settings.builtInZoomControls = false
         settings.displayZoomControls = false
+        settings.setSupportZoom(false)
+        settings.textZoom = 100
         settings.cacheMode = WebSettings.LOAD_DEFAULT
+
+        CookieManager.getInstance().apply {
+            setAcceptCookie(true)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                setAcceptThirdPartyCookies(webView, true)
+            }
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
@@ -89,6 +101,36 @@ class MainActivity : AppCompatActivity() {
 
         val defaultUserAgent = settings.userAgentString
         settings.userAgentString = "$defaultUserAgent VijaySetuAndroidApp/1.0"
+
+        webView.setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
+            try {
+                if (url.startsWith("http://") || url.startsWith("https://")) {
+                    val request = DownloadManager.Request(Uri.parse(url)).apply {
+                        setMimeType(mimetype)
+                        addRequestHeader("User-Agent", userAgent)
+                        addRequestHeader("Cookie", CookieManager.getInstance().getCookie(url) ?: "")
+                        setDescription("VijaySetu File Download")
+                        val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                        setTitle(fileName)
+                        setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                        setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                    }
+                    val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                    dm.enqueue(request)
+                    Toast.makeText(this, "डाउनलोड शुरू हो गया...", Toast.LENGTH_SHORT).show()
+                } else {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    startActivity(intent)
+                }
+            } catch (e: Exception) {
+                try {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    startActivity(intent)
+                } catch (ex: Exception) {
+                    Toast.makeText(this, "डाउनलोड पूरा नहीं हो सका", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -106,10 +148,23 @@ class MainActivity : AppCompatActivity() {
 
             override fun onReceivedError(
                 view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?
+            ) {
+                super.onReceivedError(view, request, error)
+                if (request?.isForMainFrame == true && !isNetworkAvailable()) {
+                    showOfflineView()
+                }
+            }
+
+            @Deprecated("Deprecated in Java")
+            override fun onReceivedError(
+                view: WebView?,
                 errorCode: Int,
                 description: String?,
                 failingUrl: String?
             ) {
+                super.onReceivedError(view, errorCode, description, failingUrl)
                 if (!isNetworkAvailable()) {
                     showOfflineView()
                 }
@@ -120,6 +175,12 @@ class MainActivity : AppCompatActivity() {
                 request: WebResourceRequest?
             ): Boolean {
                 val url = request?.url?.toString() ?: return false
+                return handleExternalUrls(url)
+            }
+
+            @Deprecated("Deprecated in Java")
+            override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                if (url == null) return false
                 return handleExternalUrls(url)
             }
         }
