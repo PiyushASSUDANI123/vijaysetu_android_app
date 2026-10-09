@@ -37,5 +37,5 @@ VijaySetu (विजयसेतु) का ऑफिशियल Android WebVie
 `app/src/main/res/values/strings.xml` में `default_web_url` बदलें:
 
 ```xml
-<string name="default_web_url">https://vijaysetu.piyushassudani.in</string>
+<string name="default_web_url">https://vijaysetu.vercel.app/</string>
 ```

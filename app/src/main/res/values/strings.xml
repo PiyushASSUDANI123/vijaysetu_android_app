@@ -1,6 +1,6 @@
 <resources>
     <string name="app_name">VijaySetu</string>
-    <string name="default_web_url">https://vijaysetu.piyushassudani.in</string>
+    <string name="default_web_url">https://vijaysetu.vercel.app/</string>
     <string name="offline_title">इंटरनेट कनेक्शन नहीं है</string>
     <string name="offline_message">कृपया अपना इंटरनेट कनेक्शन चेक करें और पुनः प्रयास करें।</string>
     <string name="retry_btn">पुनः प्रयास करें (Retry)</string>
