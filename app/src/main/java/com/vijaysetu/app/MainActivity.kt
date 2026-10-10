@@ -131,6 +131,7 @@ class MainActivity : AppCompatActivity() {
 
         // Native JavaScript bridge for Blob and Base64 file downloads
         webView.addJavascriptInterface(BlobDownloaderInterface(this), "AndroidBlobDownloader")
+        webView.addJavascriptInterface(SecurityBridge(this), "AndroidSecurityBridge")
 
         // Download Listener for network attachment links
         webView.setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
@@ -548,6 +549,22 @@ class MainActivity : AppCompatActivity() {
                     }
                 } catch (e: Exception) {
                     Toast.makeText(activity, "डाउनलोड पूरा नहीं हो सका", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    class SecurityBridge(private val activity: MainActivity) {
+        @JavascriptInterface
+        fun setScreenSecurity(enable: Boolean) {
+            activity.runOnUiThread {
+                if (enable) {
+                    activity.window.setFlags(
+                        android.view.WindowManager.LayoutParams.FLAG_SECURE,
+                        android.view.WindowManager.LayoutParams.FLAG_SECURE
+                    )
+                } else {
+                    activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
                 }
             }
         }
