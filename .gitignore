@@ -11,3 +11,9 @@ app/build/
 .externalNativeBuild
 .cxx
 app-release.apk
+*.apk
+*.aab
+*.jks
+*.keystore
+keystore/
+keystore.properties
