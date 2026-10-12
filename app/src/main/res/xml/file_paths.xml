@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="voter_slips" path="voter_slips/" />
+    <external-cache-path name="voter_slips_ext" path="voter_slips/" />
+    <external-files-path name="voter_slips_files" path="voter_slips/" />
+</paths>

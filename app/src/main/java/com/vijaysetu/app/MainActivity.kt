@@ -25,6 +25,7 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import java.io.File
 import java.io.FileOutputStream
@@ -129,9 +130,10 @@ class MainActivity : AppCompatActivity() {
         val defaultUserAgent = settings.userAgentString
         settings.userAgentString = "$defaultUserAgent VijaySetuAndroidApp/1.0"
 
-        // Native JavaScript bridge for Blob and Base64 file downloads
+        // Native JavaScript bridge for Blob, Base64 file downloads, and WhatsApp sharing
         webView.addJavascriptInterface(BlobDownloaderInterface(this), "AndroidBlobDownloader")
         webView.addJavascriptInterface(SecurityBridge(this), "AndroidSecurityBridge")
+        webView.addJavascriptInterface(WhatsAppBridge(this), "AndroidWhatsAppBridge")
 
         // Download Listener for network attachment links
         webView.setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
@@ -567,6 +569,78 @@ class MainActivity : AppCompatActivity() {
                     activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
                 }
             }
+        }
+    }
+
+    class WhatsAppBridge(private val activity: MainActivity) {
+        @JavascriptInterface
+        fun shareSlipToWhatsApp(base64Data: String, phoneNumber: String, messageText: String): Boolean {
+            activity.runOnUiThread {
+                activity.shareSlipToWhatsApp(base64Data, phoneNumber, messageText)
+            }
+            return true
+        }
+
+        @JavascriptInterface
+        fun isAvailable(): Boolean = true
+    }
+
+    fun shareSlipToWhatsApp(base64Data: String, phoneNumber: String, messageText: String): Boolean {
+        return try {
+            val cleanBase64 = if (base64Data.contains(",")) {
+                base64Data.substringAfter(",")
+            } else {
+                base64Data
+            }
+            val bytes = Base64.decode(cleanBase64, Base64.DEFAULT)
+            val slipDir = File(cacheDir, "voter_slips").apply { if (!exists()) mkdirs() }
+            val cleanPhone = phoneNumber.replace(Regex("[^0-9]"), "").let {
+                if (it.length == 10) "91$it" else it
+            }
+            val file = File(slipDir, "VoterSlip_${System.currentTimeMillis()}.jpg")
+            FileOutputStream(file).use { it.write(bytes) }
+
+            val contentUri: Uri = FileProvider.getUriForFile(
+                this,
+                "${packageName}.fileprovider",
+                file
+            )
+
+            val waPackages = listOf("com.whatsapp", "com.whatsapp.w4b")
+            var targetPackage: String? = null
+            for (pkg in waPackages) {
+                try {
+                    packageManager.getPackageInfo(pkg, PackageManager.GET_ACTIVITIES)
+                    targetPackage = pkg
+                    break
+                } catch (_: Exception) {
+                }
+            }
+
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "image/jpeg"
+                putExtra(Intent.EXTRA_STREAM, contentUri)
+                putExtra(Intent.EXTRA_TEXT, messageText)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                if (!targetPackage.isNullOrEmpty()) {
+                    setPackage(targetPackage)
+                    if (cleanPhone.isNotEmpty()) {
+                        putExtra("jid", "$cleanPhone@s.whatsapp.net")
+                    }
+                }
+            }
+
+            try {
+                startActivity(intent)
+            } catch (e: Exception) {
+                val chooser = Intent.createChooser(intent, "WhatsApp पर मतदाता पर्ची भेजें")
+                chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                startActivity(chooser)
+            }
+            true
+        } catch (e: Exception) {
+            Toast.makeText(this, "WhatsApp शेयर खोलने में समस्या: ${e.message}", Toast.LENGTH_SHORT).show()
+            false
         }
     }
 }
