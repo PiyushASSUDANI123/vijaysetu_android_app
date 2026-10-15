@@ -619,11 +619,13 @@ class MainActivity : AppCompatActivity() {
 
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = "image/jpeg"
+                clipData = ClipData.newRawUri("VoterSlip", contentUri)
                 putExtra(Intent.EXTRA_STREAM, contentUri)
                 putExtra(Intent.EXTRA_TEXT, messageText)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 if (!targetPackage.isNullOrEmpty()) {
                     setPackage(targetPackage)
+                    grantUriPermission(targetPackage, contentUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     if (cleanPhone.isNotEmpty()) {
                         putExtra("jid", "$cleanPhone@s.whatsapp.net")
                     }
@@ -634,9 +636,11 @@ class MainActivity : AppCompatActivity() {
                 startActivity(intent)
             } catch (e: Exception) {
                 val chooser = Intent.createChooser(intent, "WhatsApp पर मतदाता पर्ची भेजें")
+                chooser.clipData = ClipData.newRawUri("VoterSlip", contentUri)
                 chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 startActivity(chooser)
             }
+
             true
         } catch (e: Exception) {
             Toast.makeText(this, "WhatsApp शेयर खोलने में समस्या: ${e.message}", Toast.LENGTH_SHORT).show()
